@@ -1,0 +1,3 @@
+GDAL==2.0.1
+shapely
+# booleano # booleano never upgraded to python3 -- replace?
