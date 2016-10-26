@@ -5,14 +5,15 @@
 #
 
 import sys
+import json
+import copy
+
 import shapely.geometry
 import shapely.wkb
 import shapely.affinity
 from osgeo import ogr
 from osgeo import osr
-import json
-import codecs
-import copy
+
 
 class Map:
     def __init__(self, name, language):
@@ -22,13 +23,23 @@ class Map:
         self.width = 0
         self.height = 0
         self.bbox = []
+        self.projection = {}
+        self.insets = []
 
     def addPath(self, path, code, name):
         self.paths[code] = {"path": path, "name": name}
 
     def getJSCode(self):
-        map = {"paths": self.paths, "width": self.width, "height": self.height, "insets": self.insets, "projection": self.projection}
-        return "jQuery.fn.vectorMap('addMap', '"+self.name+"_"+self.projection['type']+"_"+self.language+"',"+json.dumps(map)+');'
+        map_dict = {"paths": self.paths,
+                    "width": self.width,
+                    "height": self.height,
+                    "insets": self.insets,
+                    "projection": self.projection}
+        return ("jQuery.fn.vectorMap('addMap', '{}_{}_{}', '{}');'"
+                "".format(self.name,
+                          self.projection['type'],
+                          self.language,
+                          json.dumps(map_dict)))
 
 
 class Converter:
@@ -81,7 +92,10 @@ class Converter:
         self.simplify_tolerance = args.get('simplify_tolerance')
         self.for_each = args.get('for_each')
         self.emulate_longitude0 = args.get('emulate_longitude0')
-        if args.get('emulate_longitude0') is None and (self.projection == 'merc' or self.projection =='mill') and self.longitude0 != 0:
+        if (args.get('emulate_longitude0') is None
+                and (self.projection == 'merc'
+                     or self.projection == 'mill')
+                and self.longitude0 != 0):
             self.emulate_longitude0 = True
 
         if args.get('viewport'):
@@ -101,20 +115,21 @@ class Converter:
             self.insets = args.get('insets')
         else:
             self.insets = []
+        self.viewportRect = None
 
     def loadData(self):
         for sourceConfig in self.sources:
-            self.loadDataSource( sourceConfig )
+            self.loadDataSource(sourceConfig)
 
     def loadDataSource(self, sourceConfig):
-        source = ogr.Open( sourceConfig['input_file'] )
+        source = ogr.Open(sourceConfig['input_file'])
         layer = source.GetLayer(0)
-        layer.SetAttributeFilter( sourceConfig['where'].encode('ascii') )
-        self.viewportRect = False
+        layer.SetAttributeFilter(sourceConfig['where'].encode('ascii'))
+        self.viewportRect = None
 
-        transformation = osr.CoordinateTransformation( layer.GetSpatialRef(), self.spatialRef )
+        transformation = osr.CoordinateTransformation(layer.GetSpatialRef(), self.spatialRef)
         if self.viewport:
-            layer.SetSpatialFilterRect( *self.viewport )
+            layer.SetSpatialFilterRect(*self.viewport)
             point1 = transformation.TransformPoint(self.viewport[0], self.viewport[1])
             point2 = transformation.TransformPoint(self.viewport[2], self.viewport[3])
             self.viewportRect = shapely.geometry.box(point1[0], point1[1], point2[0], point2[1])
@@ -139,22 +154,28 @@ class Converter:
             geometryType = geometry.GetGeometryType()
 
             if geometryType == ogr.wkbPolygon or geometryType == ogr.wkbMultiPolygon:
-                geometry.TransformTo( self.spatialRef )
-                shapelyGeometry = shapely.wkb.loads( geometry.ExportToWkb() )
+                geometry.TransformTo(self.spatialRef)
+                shapelyGeometry = shapely.wkb.loads(geometry.ExportToWkb())
                 if not shapelyGeometry.is_valid:
                     shapelyGeometry = shapelyGeometry.buffer(0, 1)
 
                 if self.emulate_longitude0:
-                    leftPart = shapely.affinity.translate(shapelyGeometry.intersection(left), p4[0] - p3[0])
-                    rightPart = shapely.affinity.translate(shapelyGeometry.intersection(right), p1[0] - p2[0])
-                    shapelyGeometry = leftPart.buffer(0.1, 1).union(rightPart.buffer(0.1, 1)).buffer(-0.1, 1)
+                    leftPart = shapely.affinity.translate(shapelyGeometry.intersection(left),
+                                                          p4[0] - p3[0])
+                    rightPart = shapely.affinity.translate(shapelyGeometry.intersection(right),
+                                                           p1[0] - p2[0])
+                    shapelyGeometry = leftPart.buffer(0.1, 1)
+                    shapelyGeometry = shapelyGeometry.union(rightPart.buffer(0.1, 1))
+                    shapelyGeometry = shapelyGeometry.buffer(-0.1, 1)
 
                 if not shapelyGeometry.is_valid:
                     shapelyGeometry = shapelyGeometry.buffer(0, 1)
                 shapelyGeometry = self.applyFilters(shapelyGeometry)
                 if shapelyGeometry:
-                    name = feature.GetFieldAsString(str(sourceConfig.get('name_field'))).decode(sourceConfig.get('input_file_encoding'))
-                    code = feature.GetFieldAsString(str(sourceConfig.get('code_field'))).decode(sourceConfig.get('input_file_encoding'))
+                    name = feature.GetFieldAsString(str(sourceConfig.get('name_field')))
+                    name = name.decode(sourceConfig.get('input_file_encoding'))
+                    code = feature.GetFieldAsString(str(sourceConfig.get('code_field')))
+                    code = code.decode(sourceConfig.get('input_file_encoding'))
                     if code in codes:
                         code = '_' + str(nextCode)
                         nextCode += 1
@@ -174,8 +195,10 @@ class Converter:
         self.map.insets = []
         envelope = []
         for inset in self.insets:
-            insetBbox = self.renderMapInset(inset['codes'], inset['left'], inset['top'], inset['width'])
-            insetHeight = (insetBbox[3] - insetBbox[1]) * (inset['width'] / (insetBbox[2] - insetBbox[0]))
+            insetBbox = self.renderMapInset(inset['codes'], inset['left'],
+                                            inset['top'], inset['width'])
+            insetHeight = ((insetBbox[3] - insetBbox[1])
+                           * (inset['width'] / (insetBbox[2] - insetBbox[0])))
             self.map.insets.append({
                 "bbox": [{"x": insetBbox[0], "y": -insetBbox[3]}, {"x": insetBbox[2], "y": -insetBbox[1]}],
                 "left": inset['left'],
@@ -194,8 +217,8 @@ class Converter:
         insetBbox = self.renderMapInset(main_codes, 0, 0, self.width)
         insetHeight = (insetBbox[3] - insetBbox[1]) * (self.width / (insetBbox[2] - insetBbox[0]))
 
-        envelope.append( shapely.geometry.box( 0, 0, self.width, insetHeight ) )
-        mapBbox = shapely.geometry.MultiPolygon( envelope ).bounds
+        envelope.append(shapely.geometry.box(0, 0, self.width, insetHeight))
+        mapBbox = shapely.geometry.MultiPolygon(envelope).bounds
 
         self.map.width = mapBbox[2] - mapBbox[0]
         self.map.height = mapBbox[3] - mapBbox[1]
@@ -208,7 +231,7 @@ class Converter:
         })
         self.map.projection = {"type": self.projection, "centralMeridian": float(self.longitude0)}
 
-        open(outputFile, 'w').write( self.map.getJSCode() )
+        open(outputFile, 'w').write(self.map.getJSCode())
 
         if self.for_each is not None:
             for code in codes:
@@ -221,9 +244,9 @@ class Converter:
     def renderMapInset(self, codes, left, top, width):
         envelope = []
         for code in codes:
-            envelope.append( self.features[code]['geometry'].envelope )
+            envelope.append(self.features[code]['geometry'].envelope)
 
-        bbox = shapely.geometry.MultiPolygon( envelope ).bounds
+        bbox = shapely.geometry.MultiPolygon(envelope).bounds
 
         scale = (bbox[2]-bbox[0]) / width
 
@@ -247,14 +270,18 @@ class Converter:
                 rings.append(polygon.exterior)
                 rings.extend(polygon.interiors)
                 for ring in rings:
-                    for pointIndex in range( len(ring.coords) ):
+                    for pointIndex in range(len(ring.coords)):
                         point = ring.coords[pointIndex]
                         if pointIndex == 0:
-                            path += 'M'+str( round( (point[0]-bbox[0]) / scale + left, self.precision) )
-                            path += ','+str( round( (bbox[3] - point[1]) / scale + top, self.precision) )
+                            path += 'M' + str(round((point[0]-bbox[0]) / scale + left,
+                                                    self.precision))
+                            path += ',' + str(round((bbox[3] - point[1]) / scale + top,
+                                                    self.precision))
                         else:
-                            path += 'l' + str( round(point[0]/scale - ring.coords[pointIndex-1][0]/scale, self.precision) )
-                            path += ',' + str( round(ring.coords[pointIndex-1][1]/scale - point[1]/scale, self.precision) )
+                            path += 'l' + str(round(point[0]/scale - ring.coords[pointIndex-1][0]/scale,
+                                                    self.precision))
+                            path += ',' + str(round(ring.coords[pointIndex-1][1]/scale - point[1]/scale,
+                                                    self.precision))
                     path += 'Z'
             self.map.addPath(path, feature['code'], feature['name'])
         return bbox
@@ -288,12 +315,15 @@ class Converter:
         return shapely.geometry.multipolygon.MultiPolygon(polygons)
 
 
-args = {}
-if len(sys.argv) > 1:
-    paramsJson = open(sys.argv[1], 'r').read()
-else:
-    paramsJson = sys.stdin.read()
-paramsJson = json.loads(paramsJson)
+def main():
+    if len(sys.argv) > 1:
+        paramsJson = open(sys.argv[1], 'r').read()
+    else:
+        paramsJson = sys.stdin.read()
+    paramsJson = json.loads(paramsJson)
 
-converter = Converter(paramsJson)
-converter.convert(paramsJson['output_file'])
+    converter = Converter(paramsJson)
+    converter.convert(paramsJson['output_file'])
+
+if __name__ == '__main__':
+    main()
